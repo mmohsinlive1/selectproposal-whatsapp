@@ -1,226 +1,251 @@
-const Database = require('better-sqlite3');
-const path = require('path');
+const { Pool } = require('pg');
 
-const DB_PATH = path.join(__dirname, 'data', 'bot.db');
-const db = new Database(DB_PATH);
+// Use DATABASE_URL from Heroku/Railway or local Postgres
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized: false }
+});
 
-// Enable WAL mode for better performance
-db.pragma('journal_mode = WAL');
+// ─── Schema Setup ──────────────────────────────────────────────────────────
+async function initDB() {
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS wa_config (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      );
 
-// ─── Schema ────────────────────────────────────────────────────────────────
+      CREATE TABLE IF NOT EXISTS wa_leads (
+        id SERIAL PRIMARY KEY,
+        phone TEXT NOT NULL,
+        name TEXT,
+        gender TEXT,
+        dob_date INTEGER,
+        dob_month INTEGER,
+        dob_year INTEGER,
+        city TEXT,
+        education TEXT,
+        plan TEXT,
+        status TEXT DEFAULT 'registered',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS config (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-  );
+      CREATE TABLE IF NOT EXISTS wa_chats (
+        id SERIAL PRIMARY KEY,
+        phone TEXT NOT NULL,
+        direction TEXT NOT NULL,
+        message TEXT,
+        media_type TEXT,
+        timestamp TIMESTAMPTZ DEFAULT NOW()
+      );
 
-  CREATE TABLE IF NOT EXISTS leads (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    phone      TEXT NOT NULL,
-    name       TEXT,
-    gender     TEXT,
-    dob_date   TEXT,
-    dob_month  TEXT,
-    dob_year   TEXT,
-    city       TEXT,
-    education  TEXT,
-    plan       TEXT,
-    status     TEXT DEFAULT 'registered',
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
-  );
+      CREATE TABLE IF NOT EXISTS wa_conversations (
+        phone TEXT PRIMARY KEY,
+        state TEXT DEFAULT 'idle',
+        step TEXT,
+        data JSONB DEFAULT '{}',
+        bot_paused BOOLEAN DEFAULT FALSE,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
 
-  CREATE TABLE IF NOT EXISTS chats (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    phone      TEXT NOT NULL,
-    direction  TEXT NOT NULL,   -- 'in' or 'out'
-    message    TEXT NOT NULL,
-    timestamp  TEXT DEFAULT (datetime('now'))
-  );
+      CREATE TABLE IF NOT EXISTS wa_auth (
+        key TEXT PRIMARY KEY,
+        value JSONB
+      );
+    `);
 
-  CREATE TABLE IF NOT EXISTS conversations (
-    phone      TEXT PRIMARY KEY,
-    state      TEXT DEFAULT 'idle',
-    step       TEXT,
-    data       TEXT DEFAULT '{}',
-    bot_paused INTEGER DEFAULT 0,
-    updated_at TEXT DEFAULT (datetime('now'))
-  );
-`);
+    // Seed defaults
+    const defaults = {
+      bot_enabled: '1',
+      welcome_message: `Assalam o Alaikum! 🙏\nWelcome to Select Proposal — Pakistan's premium matrimonial service for educated professionals.\n\nHow can we help you today?\n\n1 — How it works\n2 — Register\n3 — Pricing\n4 — Talk to Admin`,
+      how_it_works: `*Select Proposal* connects educated professionals for marriage.\n\n✅ Create your profile\n✅ Browse verified profiles\n✅ Send & receive proposals\n✅ Chat with matches\n\nAll profiles are manually verified for authenticity.\n\n👉 Ready to register? Type *2*\n👉 Back to menu? Type *0*`,
+      register_q1: `Please enter your full name\n_(Example: Ahmed Khan)_`,
+      register_q2: `Your gender?\n1 — Male\n2 — Female`,
+      register_q3: `Date of birth — enter DATE (1-31)\n_(Example: 15)_`,
+      register_q4: `Now enter MONTH (1-12)\n_(Example: 6 for June)_`,
+      register_q5: `Now enter YEAR (4 digits)\n_(Example: 1995)_`,
+      register_q6: `Your city?\n_(Example: Lahore)_`,
+      register_q7: `Your education?\n1 — Diploma\n2 — Bachelors (2 year)\n3 — Bachelors (4 year)\n4 — Masters\n5 — MPhil\n6 — PhD\n7 — Medical Doctor (MD/MBBS)\n8 — Mufti / Aalim\n9 — Others`,
+      register_complete: `Thank you, {{name}}! ✅ Your details have been saved.`,
+      pricing_male: `Choose your plan:\n\n⭐ *Select Plus* — PKR 1,999 (2 months)\n1 — Select Plus\n\n💎 *Select Gold* — PKR 3,999 (3 months)\n2 — Select Gold\n\n👑 *Select Elite* — PKR 4,999 (6 months)\n3 — Select Elite`,
+      pricing_female_pk: `Choose your plan:\n\n🆓 *Free Plan* — Browse on website\n1 — Free Plan\n\n⭐ *Select Plus* — PKR 1,499 (2 months)\n2 — Select Plus\n\n👑 *Select Queen* — PKR 2,999 (4 months)\n3 — Select Queen`,
+      pricing_overseas: `Registration is free for overseas users! 🌍\nSign up here: https://selectproposal.com/register`,
+      pricing_menu: `Our Plans:\n\n*For Men (Pakistan):*\n⭐ Select Plus — PKR 1,999 (2 months)\n💎 Select Gold — PKR 3,999 (3 months)\n👑 Select Elite — PKR 4,999 (6 months)\n\n*For Women (Pakistan):*\n🆓 Free Plan — Browse on website\n⭐ Select Plus — PKR 1,499 (2 months)\n👑 Select Queen — PKR 2,999 (4 months)\n\n*Overseas:*\n🌍 Free registration!\n\n👉 Type *2* to register now\n👉 Type *0* for main menu`,
+      bank_details: `Please transfer to:\n\n🏦 *HBL (Habib Bank Limited)*\nAccount Title: SELECT PROPOSAL\nAccount No: 53397000055555\nIBAN: PK65HABB0053397000055555\n\nAfter payment, send a screenshot here. We will verify within 24 hours. ✅`,
+      free_female_redirect: `The Free Plan is available on our website. Sign up here:\n👉 https://selectproposal.com/register\n\nFor premium features, type *0* to go back and choose a paid plan.`,
+      payment_received: `Thank you! 🎉 We have received your payment screenshot.\nOur team will verify it within 24 hours.\n\nOnce verified, you can log in at:\n👉 https://selectproposal.com/login\n\nType *0* for main menu.`,
+      talk_to_admin: `Our admin will reply to you shortly. Please wait. 🙏\n\n_(The bot is now paused for this conversation. An admin will respond manually.)_`
+    };
 
-// ─── Default Config ────────────────────────────────────────────────────────
+    for (const [key, value] of Object.entries(defaults)) {
+      await client.query(
+        `INSERT INTO wa_config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING`,
+        [key, value]
+      );
+    }
 
-const DEFAULTS = {
-  bot_enabled: '1',
-  welcome_message: `Assalam o Alaikum! 🙏\nWelcome to Select Proposal — Pakistan's trusted online rishta platform for educated families.\n\nHow can we help you?\n1️⃣ How it works\n2️⃣ Register\n3️⃣ Pricing / Plans\n4️⃣ Talk to Admin`,
-
-  how_it_works: `Select Proposal is an online rishta service where:\n✅ You create your profile\n✅ Browse verified educated proposals (doctors, engineers, graduates)\n✅ Your privacy is in your hands — photos only visible after approval\n✅ Send and receive proposals from home\n\nWebsite: selectproposal.com\n\n1️⃣ Register now\n0️⃣ Main Menu`,
-
-  register_q1: `Please enter your full name\n_(Example: Ahmed Khan)_`,
-  register_q2: `Your gender?\n1 — Male\n2 — Female`,
-  register_q3: `Date of birth — enter DATE (1-31)\n_(Example: 15)_`,
-  register_q4: `Now enter MONTH (1-12)\n_(Example: 6)_`,
-  register_q5: `Now enter YEAR (4 digits)\n_(Example: 1995)_`,
-  register_q6: `Your city?\n_(Example: Lahore)_`,
-  register_q7: `Your education?\n1 — Diploma\n2 — Bachelors (2 year)\n3 — Bachelors (4 year)\n4 — Masters\n5 — MPhil\n6 — PhD\n7 — Medical Doctor (MD/MBBS)\n8 — Mufti/Aalim\n9 — Others`,
-
-  register_complete: `Thank you, {{name}}! ✅ Your details have been received.`,
-
-  pricing_male: `Choose your plan:\n\n⭐ Select Plus — PKR 1,999 (2 months)\n⭐ Select Gold — PKR 3,999 (3 months)\n⭐ Select Elite — PKR 4,999 (6 months)\n\nReply with the plan number (1, 2, or 3).`,
-
-  pricing_female_pk: `Choose your plan:\n\n1️⃣ Free Plan (available on website only)\n2️⃣ Select Plus — PKR 1,499 (2 months)\n3️⃣ Select Queen — PKR 2,999 (4 months)\n\nReply with the plan number (1, 2, or 3).`,
-
-  pricing_overseas: `Registration is free for overseas users! 🎉\nSign up here: selectproposal.com/register`,
-
-  pricing_menu: `🎉 Registration is FREE for overseas users!\n\n💰 Premium Plans (Male — Pakistan):\n⭐ Select Plus — PKR 1,999 (2 months)\n⭐ Select Gold — PKR 3,999 (3 months)\n⭐ Select Elite — PKR 4,999 (6 months)\n\n💰 Premium Plans (Female — Pakistan):\n⭐ Select Plus — PKR 1,499 (2 months)\n⭐ Select Queen — PKR 2,999 (4 months)\n\n💳 Payment — Bank Transfer:\n🏦 HBL (Habib Bank Limited)\nAccount Title: SELECT PROPOSAL\nAccount No: 53397000055555\nIBAN: PK65HABB0053397000055555\n\n0️⃣ Main Menu`,
-
-  bank_details: `💳 Payment — Bank Transfer:\n🏦 HBL (Habib Bank Limited)\nAccount Title: SELECT PROPOSAL\nAccount No: 53397000055555\nIBAN: PK65HABB0053397000055555\n\nAfter payment, send the screenshot here ✅`,
-
-  free_female_redirect: `The Free Plan is available on our website. Sign up here:\nselectproposal.com/register\n\n0️⃣ Main Menu`,
-
-  payment_received: `Thank you! Your payment is being verified. Your account will be activated within 24 hours, InshaAllah.\nLogin at: selectproposal.com/login`,
-
-  talk_to_admin: `Your message has been received. Admin will reply shortly, InshaAllah. 🙏\nThank you!`,
-
-  education_options: JSON.stringify([
-    'Diploma',
-    'Bachelors (2 year)',
-    'Bachelors (4 year)',
-    'Masters',
-    'MPhil',
-    'PhD',
-    'Medical Doctor (MD/MBBS)',
-    'Mufti/Aalim',
-    'Others'
-  ]),
-
-  male_plans: JSON.stringify([
-    { name: 'Select Plus', price: 'PKR 1,999', duration: '2 months' },
-    { name: 'Select Gold', price: 'PKR 3,999', duration: '3 months' },
-    { name: 'Select Elite', price: 'PKR 4,999', duration: '6 months' }
-  ]),
-
-  female_plans: JSON.stringify([
-    { name: 'Free Plan', price: 'Free', duration: 'website only', free: true },
-    { name: 'Select Plus', price: 'PKR 1,499', duration: '2 months' },
-    { name: 'Select Queen', price: 'PKR 2,999', duration: '4 months' }
-  ])
-};
-
-// Insert defaults only if not already set
-const insertDefault = db.prepare('INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)');
-for (const [key, value] of Object.entries(DEFAULTS)) {
-  insertDefault.run(key, value);
-}
-
-// ─── Config helpers ────────────────────────────────────────────────────────
-
-function getConfig(key) {
-  const row = db.prepare('SELECT value FROM config WHERE key = ?').get(key);
-  return row ? row.value : null;
-}
-
-function setConfig(key, value) {
-  db.prepare('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)').run(key, value);
-}
-
-function getAllConfig() {
-  const rows = db.prepare('SELECT key, value FROM config').all();
-  const config = {};
-  for (const row of rows) {
-    config[row.key] = row.value;
+    console.log('[DB] Postgres initialized');
+  } finally {
+    client.release();
   }
+}
+
+// ─── Config ────────────────────────────────────────────────────────────────
+async function getConfig(key) {
+  const res = await pool.query('SELECT value FROM wa_config WHERE key = $1', [key]);
+  return res.rows[0]?.value;
+}
+
+async function getAllConfig() {
+  const res = await pool.query('SELECT key, value FROM wa_config');
+  const config = {};
+  for (const row of res.rows) config[row.key] = row.value;
   return config;
 }
 
-// ─── Lead helpers ──────────────────────────────────────────────────────────
-
-function createLead(data) {
-  const stmt = db.prepare(`
-    INSERT INTO leads (phone, name, gender, dob_date, dob_month, dob_year, city, education, plan, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  return stmt.run(
-    data.phone, data.name, data.gender,
-    data.dob_date, data.dob_month, data.dob_year,
-    data.city, data.education, data.plan || null, data.status || 'registered'
+async function setConfig(key, value) {
+  await pool.query(
+    `INSERT INTO wa_config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2`,
+    [key, value]
   );
 }
 
-function getLeads(limit = 100, offset = 0) {
-  return db.prepare('SELECT * FROM leads ORDER BY created_at DESC LIMIT ? OFFSET ?').all(limit, offset);
+// ─── Leads ─────────────────────────────────────────────────────────────────
+async function createLead(phone) {
+  const res = await pool.query(
+    `INSERT INTO wa_leads (phone) VALUES ($1) RETURNING *`,
+    [phone]
+  );
+  return res.rows[0];
 }
 
-function getLeadCount() {
-  return db.prepare('SELECT COUNT(*) as count FROM leads').get().count;
+async function getLeadByPhone(phone) {
+  const res = await pool.query('SELECT * FROM wa_leads WHERE phone = $1 ORDER BY id DESC LIMIT 1', [phone]);
+  return res.rows[0] || null;
 }
 
-function getLeadByPhone(phone) {
-  return db.prepare('SELECT * FROM leads WHERE phone = ?').get(phone);
-}
-
-function updateLeadStatus(id, status) {
-  db.prepare(`UPDATE leads SET status = ?, updated_at = datetime('now') WHERE id = ?`).run(status, id);
-}
-
-// ─── Chat helpers ──────────────────────────────────────────────────────────
-
-function logChat(phone, direction, message) {
-  db.prepare('INSERT INTO chats (phone, direction, message) VALUES (?, ?, ?)').run(phone, direction, message);
-}
-
-function getChatHistory(phone, limit = 50) {
-  return db.prepare('SELECT * FROM chats WHERE phone = ? ORDER BY timestamp DESC LIMIT ?').all(phone, limit).reverse();
-}
-
-function getRecentChats(limit = 20) {
-  return db.prepare(`
-    SELECT phone, MAX(timestamp) as last_message, COUNT(*) as message_count
-    FROM chats GROUP BY phone ORDER BY last_message DESC LIMIT ?
-  `).all(limit);
-}
-
-// ─── Conversation state helpers ────────────────────────────────────────────
-
-function getConversation(phone) {
-  let conv = db.prepare('SELECT * FROM conversations WHERE phone = ?').get(phone);
-  if (!conv) {
-    db.prepare('INSERT INTO conversations (phone) VALUES (?)').run(phone);
-    conv = db.prepare('SELECT * FROM conversations WHERE phone = ?').get(phone);
-  }
-  return conv;
-}
-
-function updateConversation(phone, updates) {
-  const fields = [];
+async function updateLead(id, fields) {
+  const sets = [];
   const values = [];
-  for (const [key, val] of Object.entries(updates)) {
-    fields.push(`${key} = ?`);
+  let idx = 1;
+  for (const [key, val] of Object.entries(fields)) {
+    sets.push(`${key} = $${idx}`);
     values.push(val);
+    idx++;
   }
-  fields.push("updated_at = datetime('now')");
-  values.push(phone);
-  db.prepare(`UPDATE conversations SET ${fields.join(', ')} WHERE phone = ?`).run(...values);
+  sets.push(`updated_at = NOW()`);
+  values.push(id);
+  await pool.query(`UPDATE wa_leads SET ${sets.join(', ')} WHERE id = $${idx}`, values);
 }
 
-function pauseBot(phone) {
-  updateConversation(phone, { bot_paused: 1 });
+async function getLeadCount() {
+  const res = await pool.query('SELECT COUNT(*) as count FROM wa_leads');
+  return parseInt(res.rows[0].count);
 }
 
-function resumeBot(phone) {
-  updateConversation(phone, { bot_paused: 0 });
+async function getLeads(limit = 20, offset = 0) {
+  const res = await pool.query('SELECT * FROM wa_leads ORDER BY id DESC LIMIT $1 OFFSET $2', [limit, offset]);
+  return res.rows;
 }
 
-function isPaused(phone) {
-  const conv = getConversation(phone);
-  return conv.bot_paused === 1;
+async function updateLeadStatus(id, status) {
+  await pool.query(`UPDATE wa_leads SET status = $1, updated_at = NOW() WHERE id = $2`, [status, id]);
+}
+
+// ─── Chats ─────────────────────────────────────────────────────────────────
+async function saveChat(phone, direction, message, mediaType = null) {
+  await pool.query(
+    `INSERT INTO wa_chats (phone, direction, message, media_type) VALUES ($1, $2, $3, $4)`,
+    [phone, direction, message, mediaType]
+  );
+}
+
+async function getRecentChats() {
+  const res = await pool.query(`
+    SELECT phone, COUNT(*) as message_count, MAX(timestamp) as last_message
+    FROM wa_chats GROUP BY phone ORDER BY last_message DESC LIMIT 50
+  `);
+  return res.rows;
+}
+
+async function getChatHistory(phone) {
+  const res = await pool.query(
+    'SELECT * FROM wa_chats WHERE phone = $1 ORDER BY timestamp ASC',
+    [phone]
+  );
+  return res.rows;
+}
+
+// ─── Conversations ─────────────────────────────────────────────────────────
+async function getConversation(phone) {
+  const res = await pool.query('SELECT * FROM wa_conversations WHERE phone = $1', [phone]);
+  return res.rows[0] || null;
+}
+
+async function upsertConversation(phone, fields) {
+  const existing = await getConversation(phone);
+  if (!existing) {
+    await pool.query(
+      `INSERT INTO wa_conversations (phone, state, step, data, bot_paused) VALUES ($1, $2, $3, $4, $5)`,
+      [phone, fields.state || 'idle', fields.step || null, JSON.stringify(fields.data || {}), fields.bot_paused || false]
+    );
+  } else {
+    const sets = [];
+    const values = [];
+    let idx = 1;
+    for (const [key, val] of Object.entries(fields)) {
+      if (key === 'data') {
+        sets.push(`data = $${idx}`);
+        values.push(JSON.stringify(val));
+      } else {
+        sets.push(`${key} = $${idx}`);
+        values.push(val);
+      }
+      idx++;
+    }
+    sets.push(`updated_at = NOW()`);
+    values.push(phone);
+    await pool.query(`UPDATE wa_conversations SET ${sets.join(', ')} WHERE phone = $${idx}`, values);
+  }
+}
+
+async function pauseBot(phone) {
+  await upsertConversation(phone, { bot_paused: true });
+}
+
+async function resumeBot(phone) {
+  await upsertConversation(phone, { bot_paused: false, state: 'idle', step: null, data: {} });
+}
+
+// ─── Auth State (Baileys session persistence) ──────────────────────────────
+async function getAuthValue(key) {
+  const res = await pool.query('SELECT value FROM wa_auth WHERE key = $1', [key]);
+  return res.rows[0]?.value || null;
+}
+
+async function setAuthValue(key, value) {
+  await pool.query(
+    `INSERT INTO wa_auth (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2`,
+    [key, JSON.stringify(value)]
+  );
+}
+
+async function deleteAuthValue(key) {
+  await pool.query('DELETE FROM wa_auth WHERE key = $1', [key]);
+}
+
+async function getAuthKeys(prefix) {
+  const res = await pool.query('SELECT key FROM wa_auth WHERE key LIKE $1', [prefix + '%']);
+  return res.rows.map(r => r.key);
 }
 
 module.exports = {
-  db,
-  getConfig, setConfig, getAllConfig,
-  createLead, getLeads, getLeadCount, getLeadByPhone, updateLeadStatus,
-  logChat, getChatHistory, getRecentChats,
-  getConversation, updateConversation, pauseBot, resumeBot, isPaused
+  pool, initDB,
+  getConfig, getAllConfig, setConfig,
+  createLead, getLeadByPhone, updateLead, getLeadCount, getLeads, updateLeadStatus,
+  saveChat, getRecentChats, getChatHistory,
+  getConversation, upsertConversation, pauseBot, resumeBot,
+  getAuthValue, setAuthValue, deleteAuthValue, getAuthKeys
 };

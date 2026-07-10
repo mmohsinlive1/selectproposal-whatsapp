@@ -1,16 +1,14 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, proto, initAuthCreds, BufferJSON } = require('@whiskeysockets/baileys');
 const pino = require('pino');
-const path = require('path');
 const { handleMessage, onAdminReply } = require('./bot');
-const { logChat, getConversation, resumeBot } = require('./db');
+const { saveChat, getAuthValue, setAuthValue, deleteAuthValue, getAuthKeys } = require('./db');
 const QRCode = require('qrcode');
 
-const AUTH_DIR = path.join(__dirname, 'data', 'auth');
 const logger = pino({ level: 'silent' });
 
 let sock = null;
 let qrCode = null;
-let connectionStatus = 'disconnected'; // disconnected | connecting | qr_ready | connected
+let connectionStatus = 'disconnected';
 let statusListeners = [];
 let ownJid = null;
 
@@ -26,8 +24,48 @@ function notifyStatus() {
   for (const cb of statusListeners) cb(getStatus());
 }
 
+// ─── Postgres-backed Auth State ────────────────────────────────────────────
+// Stores Baileys credentials & keys in wa_auth table so session survives restarts
+async function usePostgresAuthState() {
+  // Load or create credentials
+  const credsRaw = await getAuthValue('creds');
+  const creds = credsRaw ? JSON.parse(JSON.stringify(credsRaw), BufferJSON.reviver) : initAuthCreds();
+
+  const keys = {
+    get: async (type, ids) => {
+      const result = {};
+      for (const id of ids) {
+        const val = await getAuthValue(`${type}-${id}`);
+        if (val) {
+          result[id] = JSON.parse(JSON.stringify(val), BufferJSON.reviver);
+        }
+      }
+      return result;
+    },
+    set: async (data) => {
+      for (const [type, entries] of Object.entries(data)) {
+        for (const [id, value] of Object.entries(entries)) {
+          const key = `${type}-${id}`;
+          if (value) {
+            await setAuthValue(key, JSON.parse(JSON.stringify(value, BufferJSON.replacer)));
+          } else {
+            await deleteAuthValue(key);
+          }
+        }
+      }
+    }
+  };
+
+  const saveCreds = async () => {
+    await setAuthValue('creds', JSON.parse(JSON.stringify(creds, BufferJSON.replacer)));
+  };
+
+  return { state: { creds, keys }, saveCreds };
+}
+
+// ─── Main WhatsApp Connection ──────────────────────────────────────────────
 async function startWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const { state, saveCreds } = await usePostgresAuthState();
   const { version } = await fetchLatestBaileysVersion();
 
   connectionStatus = 'connecting';
@@ -45,7 +83,6 @@ async function startWhatsApp() {
     markOnlineOnConnect: false
   });
 
-  // Connection updates
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
@@ -79,41 +116,31 @@ async function startWhatsApp() {
     }
   });
 
-  // Save credentials on update
   sock.ev.on('creds.update', saveCreds);
 
-  // Handle incoming messages
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
 
     for (const msg of messages) {
-      // Skip status messages
       if (msg.key.remoteJid === 'status@broadcast') continue;
-      // Skip group messages
       if (msg.key.remoteJid?.endsWith('@g.us')) continue;
 
       const phone = msg.key.remoteJid?.replace('@s.whatsapp.net', '');
       if (!phone) continue;
 
-      // Check if this is an outgoing message (admin replied from phone)
+      // Admin replied from phone → pause bot
       if (msg.key.fromMe) {
-        onAdminReply(phone);
+        await onAdminReply(phone);
         continue;
       }
 
-      // Extract message text
       const text = msg.message?.conversation
         || msg.message?.extendedTextMessage?.text
         || msg.message?.buttonsResponseMessage?.selectedDisplayText
         || msg.message?.listResponseMessage?.title
         || '';
 
-      // Check for media
-      const hasMedia = !!(
-        msg.message?.imageMessage
-        || msg.message?.documentMessage
-        || msg.message?.videoMessage
-      );
+      const hasMedia = !!(msg.message?.imageMessage || msg.message?.documentMessage || msg.message?.videoMessage);
       const mediaType = msg.message?.imageMessage ? 'image'
         : msg.message?.documentMessage ? 'document'
         : msg.message?.videoMessage ? 'video'
@@ -122,12 +149,11 @@ async function startWhatsApp() {
       console.log(`[WhatsApp] Message from ${phone}: ${text || '[media]'}`);
 
       try {
-        const replies = handleMessage(phone, text, hasMedia, mediaType);
+        const replies = await handleMessage(phone, text, hasMedia, mediaType);
         if (replies && replies.length > 0) {
           for (const reply of replies) {
             await sock.sendMessage(msg.key.remoteJid, { text: reply });
-            logChat(phone, 'out', reply);
-            // Small delay between messages
+            await saveChat(phone, 'out', reply);
             await new Promise(r => setTimeout(r, 500));
           }
         }
@@ -146,7 +172,7 @@ async function sendMessage(phone, text) {
   }
   const jid = phone.includes('@') ? phone : `${phone}@s.whatsapp.net`;
   await sock.sendMessage(jid, { text });
-  logChat(phone.replace('@s.whatsapp.net', ''), 'out', text);
+  await saveChat(phone.replace('@s.whatsapp.net', ''), 'out', text);
 }
 
 async function disconnectWhatsApp() {
