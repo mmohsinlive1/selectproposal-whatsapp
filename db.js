@@ -59,8 +59,8 @@ async function initDB() {
     // Seed defaults
     const defaults = {
       bot_enabled: '1',
-      welcome_message: `Assalam o Alaikum! 🙏\nWelcome to Select Proposal — Pakistan's premium matrimonial service for educated professionals.\n\nHow can we help you today?\n\n1 — How it works\n2 — Register\n3 — Pricing\n4 — Talk to Admin`,
-      how_it_works: `*Select Proposal* connects educated professionals for marriage.\n\n✅ Create your profile\n✅ Browse verified profiles\n✅ Send & receive proposals\n✅ Chat with matches\n\nAll profiles are manually verified for authenticity.\n\n👉 Ready to register? Type *2*\n👉 Back to menu? Type *0*`,
+      welcome_message: `Assalam o Alaikum! 🙏\nWelcome to Select Proposal — Pakistan's premium matrimonial service for educated professionals.\n\nPlease note: we are a *self-service platform, not a rishta agency*. You search and connect yourself — we verify profiles, we do not mediate or arrange matches.\n\nHow can we help you today?\n\n1 — How it works\n2 — Register\n3 — Pricing\n4 — Talk to Admin`,
+      how_it_works: `*Select Proposal* connects educated professionals for marriage.\n\n✅ Create your profile\n✅ Browse verified profiles\n✅ Send & receive proposals\n✅ Chat with matches\n\nAll profiles are manually verified for authenticity.\n\n⚠️ We do *not* do personal matchmaking. You browse, shortlist and contact families yourself.\n\n👉 Ready to register? Type *2*\n👉 Back to menu? Type *0*`,
       register_q1: `Please enter your full name\n_(Example: Ahmed Khan)_`,
       register_q2: `Your gender?\n1 — Male\n2 — Female`,
       register_q3: `Date of birth — enter DATE (1-31)\n_(Example: 15)_`,
